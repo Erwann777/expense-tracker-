@@ -204,3 +204,4 @@ class _SparklinePainter extends CustomPainter {
     return oldDelegate.progress != progress || oldDelegate.data != data;
   }
 }
+// updated: 2026-09-23

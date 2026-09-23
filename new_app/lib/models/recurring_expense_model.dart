@@ -121,3 +121,4 @@ class RecurringExpenseModel {
     {'key': 'yearly', 'label': 'Yearly', 'icon': '🎯'},
   ];
 }
+// updated: 2026-09-23
