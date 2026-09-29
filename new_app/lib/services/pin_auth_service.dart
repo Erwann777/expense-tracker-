@@ -1,17 +1,32 @@
 import 'dart:convert';
 import 'dart:math';
+import 'dart:io' show Platform;
 import 'package:crypto/crypto.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:shared_preferences/shared_preferences.dart';
 
+// Only import flutter_secure_storage on supported platforms
+import 'secure_storage_stub.dart'
+    if (dart.library.io) 'secure_storage_mobile.dart';
+
 /// Service that manages PIN authentication, biometric settings, and backup codes.
-/// All sensitive data (hashed PIN, backup codes) is stored via flutter_secure_storage.
+/// On Android/iOS: uses flutter_secure_storage for secure key storage.
+/// On Windows/Web/Desktop: falls back to shared_preferences (no ATL dependency).
 class PinAuthService {
   static const _baseKeyPinHash = 'pin_hash';
   static const _baseKeyPinSet = 'pin_is_set';
   static const _baseKeyBackupCode = 'backup_code';
   static const _baseKeyFailedAttempts = 'failed_attempts';
   static const _baseKeyLockoutUntil = 'lockout_until';
+
+  static bool get _useSecureStorage {
+    if (kIsWeb) return false;
+    try {
+      return Platform.isAndroid || Platform.isIOS;
+    } catch (_) {
+      return false;
+    }
+  }
 
   Future<String> _key(String base) async {
     final prefs = await SharedPreferences.getInstance();
@@ -22,11 +37,34 @@ class PinAuthService {
   static const int maxFailedAttempts = 5;
   static const int lockoutDurationSeconds = 30;
 
-  final FlutterSecureStorage _storage;
+  // ─── Cross-platform storage helpers ───
 
-  PinAuthService({
-    FlutterSecureStorage? storage,
-  })  : _storage = storage ?? const FlutterSecureStorage();
+  Future<void> _write(String key, String value) async {
+    if (_useSecureStorage) {
+      await SecureStorageHelper.write(key, value);
+    } else {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(key, value);
+    }
+  }
+
+  Future<String?> _read(String key) async {
+    if (_useSecureStorage) {
+      return await SecureStorageHelper.read(key);
+    } else {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString(key);
+    }
+  }
+
+  Future<void> _delete(String key) async {
+    if (_useSecureStorage) {
+      await SecureStorageHelper.delete(key);
+    } else {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(key);
+    }
+  }
 
   // ─── PIN Management ───
 
@@ -38,20 +76,20 @@ class PinAuthService {
 
   /// Check if PIN has been set up.
   Future<bool> isPinSet() async {
-    final val = await _storage.read(key: await _key(_baseKeyPinSet));
+    final val = await _read(await _key(_baseKeyPinSet));
     return val == 'true';
   }
 
   /// Set a new PIN. Returns the generated backup code.
   Future<String> setPin(String pin) async {
     final hash = _hashPin(pin);
-    await _storage.write(key: await _key(_baseKeyPinHash), value: hash);
-    await _storage.write(key: await _key(_baseKeyPinSet), value: 'true');
+    await _write(await _key(_baseKeyPinHash), hash);
+    await _write(await _key(_baseKeyPinSet), 'true');
     await _resetFailedAttempts();
 
     // Generate and store backup code
     final backupCode = _generateBackupCode();
-    await _storage.write(key: await _key(_baseKeyBackupCode), value: backupCode);
+    await _write(await _key(_baseKeyBackupCode), backupCode);
 
     return backupCode;
   }
@@ -61,7 +99,7 @@ class PinAuthService {
     // Check lockout
     if (await _isLockedOut()) return false;
 
-    final storedHash = await _storage.read(key: await _key(_baseKeyPinHash));
+    final storedHash = await _read(await _key(_baseKeyPinHash));
     if (storedHash == null) return false;
 
     final inputHash = _hashPin(pin);
@@ -82,15 +120,15 @@ class PinAuthService {
     if (!isValid) return false;
 
     final hash = _hashPin(newPin);
-    await _storage.write(key: await _key(_baseKeyPinHash), value: hash);
+    await _write(await _key(_baseKeyPinHash), hash);
     return true;
   }
 
   /// Remove PIN and all auth data.
   Future<void> clearPin() async {
-    await _storage.delete(key: await _key(_baseKeyPinHash));
-    await _storage.delete(key: await _key(_baseKeyPinSet));
-    await _storage.delete(key: await _key(_baseKeyBackupCode));
+    await _delete(await _key(_baseKeyPinHash));
+    await _delete(await _key(_baseKeyPinSet));
+    await _delete(await _key(_baseKeyBackupCode));
     await _resetFailedAttempts();
   }
 
@@ -105,11 +143,11 @@ class PinAuthService {
   }
 
   Future<String?> getBackupCode() async {
-    return await _storage.read(key: await _key(_baseKeyBackupCode));
+    return await _read(await _key(_baseKeyBackupCode));
   }
 
   Future<bool> verifyBackupCode(String code) async {
-    final stored = await _storage.read(key: await _key(_baseKeyBackupCode));
+    final stored = await _read(await _key(_baseKeyBackupCode));
     if (stored == null) return false;
     return stored == code.trim();
   }
@@ -120,45 +158,43 @@ class PinAuthService {
     if (!isValid) return null;
 
     final hash = _hashPin(newPin);
-    await _storage.write(key: await _key(_baseKeyPinHash), value: hash);
+    await _write(await _key(_baseKeyPinHash), hash);
     await _resetFailedAttempts();
 
     // Generate new backup code
     final newBackupCode = _generateBackupCode();
-    await _storage.write(key: await _key(_baseKeyBackupCode), value: newBackupCode);
+    await _write(await _key(_baseKeyBackupCode), newBackupCode);
 
     return newBackupCode;
   }
 
-
-
   Future<int> getFailedAttempts() async {
-    final val = await _storage.read(key: await _key(_baseKeyFailedAttempts));
+    final val = await _read(await _key(_baseKeyFailedAttempts));
     return int.tryParse(val ?? '0') ?? 0;
   }
 
   Future<void> _incrementFailedAttempts() async {
     final current = await getFailedAttempts();
     final next = current + 1;
-    await _storage.write(key: await _key(_baseKeyFailedAttempts), value: next.toString());
+    await _write(await _key(_baseKeyFailedAttempts), next.toString());
 
     if (next >= maxFailedAttempts) {
       final lockUntil = DateTime.now()
           .add(const Duration(seconds: lockoutDurationSeconds));
-      await _storage.write(
-        key: await _key(_baseKeyLockoutUntil),
-        value: lockUntil.toIso8601String(),
+      await _write(
+        await _key(_baseKeyLockoutUntil),
+        lockUntil.toIso8601String(),
       );
     }
   }
 
   Future<void> _resetFailedAttempts() async {
-    await _storage.write(key: await _key(_baseKeyFailedAttempts), value: '0');
-    await _storage.delete(key: await _key(_baseKeyLockoutUntil));
+    await _write(await _key(_baseKeyFailedAttempts), '0');
+    await _delete(await _key(_baseKeyLockoutUntil));
   }
 
   Future<bool> _isLockedOut() async {
-    final lockStr = await _storage.read(key: await _key(_baseKeyLockoutUntil));
+    final lockStr = await _read(await _key(_baseKeyLockoutUntil));
     if (lockStr == null) return false;
 
     final lockUntil = DateTime.tryParse(lockStr);
@@ -174,7 +210,7 @@ class PinAuthService {
   }
 
   Future<Duration?> getRemainingLockout() async {
-    final lockStr = await _storage.read(key: await _key(_baseKeyLockoutUntil));
+    final lockStr = await _read(await _key(_baseKeyLockoutUntil));
     if (lockStr == null) return null;
 
     final lockUntil = DateTime.tryParse(lockStr);
@@ -190,11 +226,10 @@ class PinAuthService {
 
   /// Wipe all secure storage (for "Forgot PIN - Clear Data" flow).
   Future<void> clearAllData() async {
-    await _storage.delete(key: await _key(_baseKeyPinHash));
-    await _storage.delete(key: await _key(_baseKeyPinSet));
-    await _storage.delete(key: await _key(_baseKeyBackupCode));
-    await _storage.delete(key: await _key(_baseKeyFailedAttempts));
-    await _storage.delete(key: await _key(_baseKeyLockoutUntil));
+    await _delete(await _key(_baseKeyPinHash));
+    await _delete(await _key(_baseKeyPinSet));
+    await _delete(await _key(_baseKeyBackupCode));
+    await _delete(await _key(_baseKeyFailedAttempts));
+    await _delete(await _key(_baseKeyLockoutUntil));
   }
 }
-// updated: 2026-09-23

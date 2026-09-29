@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'dart:io' show Platform;
 import 'providers/auth_provider.dart';
 import 'providers/expense_provider.dart';
 import 'providers/theme_provider.dart';
@@ -12,8 +16,19 @@ import 'screens/auth/pin_lock_screen.dart';
 import 'screens/main/main_shell.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  if (kIsWeb) {
+    // Initialize sqflite for Chrome/Web (uses IndexedDB under the hood)
+    databaseFactory = databaseFactoryFfiWeb;
+  } else if (Platform.isWindows || Platform.isLinux) {
+    // Initialize sqflite for Windows/Linux desktop
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
+  // Android/iOS use sqflite natively — no init needed
+
   SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
@@ -26,6 +41,8 @@ void main() {
   );
   runApp(const ExpenseTrackerApp());
 }
+
+
 
 class ExpenseTrackerApp extends StatelessWidget {
   const ExpenseTrackerApp({super.key});

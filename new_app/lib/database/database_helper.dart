@@ -2,9 +2,6 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import '../models/user_model.dart';
 import '../models/expense_model.dart';
-import '../models/wallet_model.dart';
-import '../models/recurring_expense_model.dart';
-import '../models/savings_goal_model.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
@@ -22,9 +19,12 @@ class DatabaseHelper {
     final dbPath = await getDatabasesPath();
     final path = join(dbPath, filePath);
 
+    // ignore: avoid_print
+    print('📂 DATABASE LOCATION: $path');
+
     return await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
     );
@@ -38,6 +38,12 @@ class DatabaseHelper {
       );
       // Add profile_photo_path column to users
       await db.execute("ALTER TABLE users ADD COLUMN profile_photo_path TEXT");
+    }
+    if (oldVersion < 3) {
+      // Drop unused tables
+      await db.execute('DROP TABLE IF EXISTS savings_goals');
+      await db.execute('DROP TABLE IF EXISTS recurring_expenses');
+      await db.execute('DROP TABLE IF EXISTS wallets');
     }
   }
 
@@ -67,60 +73,8 @@ class DatabaseHelper {
         type TEXT NOT NULL DEFAULT 'expense',
         note TEXT,
         date TEXT NOT NULL,
-        wallet_id INTEGER,
         receipt_path TEXT,
         is_hidden INTEGER NOT NULL DEFAULT 0,
-        recurring_id INTEGER,
-        split_group_id INTEGER,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
-        FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE SET NULL
-      )
-    ''');
-
-    await db.execute('''
-      CREATE TABLE wallets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        type TEXT NOT NULL,
-        currency TEXT NOT NULL,
-        balance REAL NOT NULL DEFAULT 0.0,
-        icon TEXT DEFAULT '💰',
-        color INTEGER DEFAULT 0xFF7C3AED,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-      )
-    ''');
-
-    await db.execute('''
-      CREATE TABLE recurring_expenses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        title TEXT NOT NULL,
-        amount REAL NOT NULL,
-        category TEXT NOT NULL,
-        frequency TEXT NOT NULL,
-        wallet_id INTEGER,
-        start_date TEXT NOT NULL,
-        end_date TEXT,
-        last_triggered TEXT,
-        is_active INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-      )
-    ''');
-
-    await db.execute('''
-      CREATE TABLE savings_goals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        title TEXT NOT NULL,
-        emoji TEXT DEFAULT '🎯',
-        target_amount REAL NOT NULL,
-        saved_amount REAL NOT NULL DEFAULT 0.0,
-        deadline TEXT NOT NULL,
-        color INTEGER DEFAULT 0xFF7C3AED,
         created_at TEXT NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
       )
@@ -130,11 +84,6 @@ class DatabaseHelper {
     await db.execute('CREATE INDEX idx_expenses_user ON expenses(user_id)');
     await db.execute('CREATE INDEX idx_expenses_date ON expenses(date)');
     await db.execute('CREATE INDEX idx_expenses_type ON expenses(type)');
-    await db.execute('CREATE INDEX idx_wallets_user ON wallets(user_id)');
-    await db.execute(
-      'CREATE INDEX idx_recurring_user ON recurring_expenses(user_id)',
-    );
-    await db.execute('CREATE INDEX idx_goals_user ON savings_goals(user_id)');
   }
 
   // ═══════════════════════════════════════════════
@@ -387,125 +336,7 @@ class DatabaseHelper {
     return (result.first['total'] as num?)?.toDouble() ?? 0.0;
   }
 
-  // ═══════════════════════════════════════════════
-  // ─── Wallet Operations ───
-  // ═══════════════════════════════════════════════
 
-  Future<int> createWallet(WalletModel wallet) async {
-    final db = await database;
-    return await db.insert('wallets', wallet.toMap());
-  }
-
-  Future<List<WalletModel>> getWallets(int userId) async {
-    final db = await database;
-    final maps = await db.query(
-      'wallets',
-      where: 'user_id = ?',
-      whereArgs: [userId],
-      orderBy: 'created_at ASC',
-    );
-    return maps.map((map) => WalletModel.fromMap(map)).toList();
-  }
-
-  Future<int> updateWallet(WalletModel wallet) async {
-    final db = await database;
-    return await db.update(
-      'wallets',
-      wallet.toMap(),
-      where: 'id = ?',
-      whereArgs: [wallet.id],
-    );
-  }
-
-  Future<int> deleteWallet(int id) async {
-    final db = await database;
-    return await db.delete('wallets', where: 'id = ?', whereArgs: [id]);
-  }
-
-  Future<double> getWalletSpent(int walletId, int year, int month) async {
-    final db = await database;
-    final start = DateTime(year, month, 1).toIso8601String();
-    final end = DateTime(year, month + 1, 0, 23, 59, 59).toIso8601String();
-    final result = await db.rawQuery(
-      'SELECT SUM(amount) as total FROM expenses WHERE wallet_id = ? AND date >= ? AND date <= ?',
-      [walletId, start, end],
-    );
-    return (result.first['total'] as num?)?.toDouble() ?? 0.0;
-  }
-
-  // ═══════════════════════════════════════════════
-  // ─── Recurring Expense Operations ───
-  // ═══════════════════════════════════════════════
-
-  Future<int> createRecurringExpense(RecurringExpenseModel recurring) async {
-    final db = await database;
-    return await db.insert('recurring_expenses', recurring.toMap());
-  }
-
-  Future<List<RecurringExpenseModel>> getRecurringExpenses(int userId) async {
-    final db = await database;
-    final maps = await db.query(
-      'recurring_expenses',
-      where: 'user_id = ?',
-      whereArgs: [userId],
-      orderBy: 'created_at DESC',
-    );
-    return maps.map((map) => RecurringExpenseModel.fromMap(map)).toList();
-  }
-
-  Future<int> updateRecurringExpense(RecurringExpenseModel recurring) async {
-    final db = await database;
-    return await db.update(
-      'recurring_expenses',
-      recurring.toMap(),
-      where: 'id = ?',
-      whereArgs: [recurring.id],
-    );
-  }
-
-  Future<int> deleteRecurringExpense(int id) async {
-    final db = await database;
-    return await db.delete(
-      'recurring_expenses',
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-  }
-
-  // ═══════════════════════════════════════════════
-  // ─── Savings Goal Operations ───
-  // ═══════════════════════════════════════════════
-
-  Future<int> createSavingsGoal(SavingsGoalModel goal) async {
-    final db = await database;
-    return await db.insert('savings_goals', goal.toMap());
-  }
-
-  Future<List<SavingsGoalModel>> getSavingsGoals(int userId) async {
-    final db = await database;
-    final maps = await db.query(
-      'savings_goals',
-      where: 'user_id = ?',
-      whereArgs: [userId],
-      orderBy: 'deadline ASC',
-    );
-    return maps.map((map) => SavingsGoalModel.fromMap(map)).toList();
-  }
-
-  Future<int> updateSavingsGoal(SavingsGoalModel goal) async {
-    final db = await database;
-    return await db.update(
-      'savings_goals',
-      goal.toMap(),
-      where: 'id = ?',
-      whereArgs: [goal.id],
-    );
-  }
-
-  Future<int> deleteSavingsGoal(int id) async {
-    final db = await database;
-    return await db.delete('savings_goals', where: 'id = ?', whereArgs: [id]);
-  }
 
   // ═══════════════════════════════════════════════
   // ─── Export / Backup ───
